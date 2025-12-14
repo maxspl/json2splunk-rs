@@ -122,8 +122,27 @@ impl FileMatcher {
 
         // Convert YAML to IndexMap to preserve order from indexer_patterns.yml
         // Important to keep original order 
+        // Select where the patterns live:
+        // - root is the patterns map
+        // - patterns are under top-level "splunk"
+        let patterns_node: YamlValue = match &raw_yaml {
+            YamlValue::Mapping(m) => {
+                // If "splunk" exists and is a mapping, use it
+                if let Some(v) = m.get(YamlValue::String("splunk".to_string())) {
+                    match v {
+                        YamlValue::Mapping(_) => v.clone(),
+                        _ => raw_yaml.clone(), // "splunk" exists but isn't a mapping -> fallback
+                    }
+                } else {
+                    raw_yaml.clone()
+                }
+            }
+            _ => raw_yaml.clone(),
+        };
+
+        // Deserialize the selected node into IndexMap<String, FileCriteria>
         let mut patterns_map: IndexMap<String, FileCriteria> =
-            match serde_yaml::from_value(raw_yaml.clone()) {
+            match serde_yaml::from_value(patterns_node.clone()) {
                 Ok(map) => map,
                 Err(e) => {
                     error!(
