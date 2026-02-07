@@ -25,6 +25,10 @@ struct Cli {
     #[arg(long = "input", required = true)]
     input: PathBuf,
 
+    /// Optional : Specifies the file type input. Defaults is None.
+    #[arg(long = "input_type")]
+    input_type: Option<String>,
+
     /// Splunk index name.
     /// Required unless --normalize_test_dir is provided.
     #[arg(
@@ -89,6 +93,10 @@ fn main() {
     if !normalize_mode && index_str.is_empty() {
         eprintln!("Error: --index is required unless --normalize_test_dir is used.");
         std::process::exit(1);
+    }
+
+    if !cli.input_type.is_none() {
+        j2s.input_type = cli.input_type.clone();
     }
 
     if j2s.configure(index_str, cli.nb_cpu, cli.test, &cli.config_spl) {

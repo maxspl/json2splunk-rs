@@ -61,6 +61,7 @@ pub struct Json2Splunk {
     pub index: String,
     pub vrl_dir: Option<PathBuf>,
     pub normalize_test_dir: Option<PathBuf>,
+    pub input_type: Option<String>,
     client: Client, 
 }
 
@@ -92,6 +93,7 @@ impl Json2Splunk {
                 index: String::new(),
                 normalize_test_dir,
                 vrl_dir: None,
+                input_type: None,
                 client, 
             }
         }
@@ -984,12 +986,15 @@ impl Json2Splunk {
     fn process_file(&self, hec_template: Option<&HttpEventCollector>, file_tuples: &FileTuple,normalize_dir: Option<&PathBuf>,) {
         let file = &file_tuples.file_path;
 
-        let ext = file
+        let mut ext = file
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
 
+        if !self.input_type.is_none(){
+            ext = self.input_type.clone().unwrap();
+        }
         // Dispatch processing based on file type: csv, jsonl or raw (eg. access logs)
         match ext.as_str() {
             "json" | "jsonl" => self.run_parallel_line_pipeline("JSON/JSONL", "output.jsonl", hec_template, file_tuples, normalize_dir, ParseMode::Json,),
