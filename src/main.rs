@@ -25,7 +25,7 @@ struct Cli {
     #[arg(long = "input", required = true)]
     input: PathBuf,
 
-    /// Optional : Specifies the file type input. Defaults is None.
+    /// Optional : Specifies the file input type (json|jsonl|csv). Default is None.
     #[arg(long = "input_type")]
     input_type: Option<String>,
 
