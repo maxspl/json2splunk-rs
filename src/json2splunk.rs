@@ -23,7 +23,7 @@ use std::thread;
 use crossbeam_channel as chan;
 use reqwest::blocking::Client; 
 use std::io::Read;
-
+use uuid::Uuid;
 
 // Structure of the Splunk configuration YAML
 #[derive(Debug, Deserialize)]
@@ -62,7 +62,8 @@ pub struct Json2Splunk {
     pub vrl_dir: Option<PathBuf>,
     pub normalize_test_dir: Option<PathBuf>,
     pub input_type: Option<String>,
-    client: Client, 
+    client: Client,
+    pub add_uid: bool,
 }
 
 enum ParseMode {
@@ -94,9 +95,14 @@ impl Json2Splunk {
                 normalize_test_dir,
                 vrl_dir: None,
                 input_type: None,
-                client, 
+                client,
+                add_uid: false, 
             }
         }
+
+    pub fn set_add_uid(&mut self, enabled: bool) {
+        self.add_uid = enabled;
+    }
 
     pub fn set_vrl_dir(&mut self, dir: Option<PathBuf>) {
         self.vrl_dir = dir;
@@ -280,6 +286,8 @@ impl Json2Splunk {
         // 12. Spawn worker threads (parallel consumers)
         let mut worker_handles = Vec::with_capacity(nb_workers);
     
+        let add_uid = self.add_uid;
+
         for _ in 0..nb_workers {
             let rx = rx.clone();
             let ctx = Arc::clone(&ctx);
@@ -352,7 +360,7 @@ impl Json2Splunk {
     
                     // 16. If Splunk HEC is enabled → build payload and batch-send
                     if let Some(ref mut hec) = hec_client {
-                        let payload = Json2Splunk::build_payload(record, &ctx);
+                        let payload = Json2Splunk::build_payload(record, &ctx, add_uid);
                         hec.batch_event(payload);
                             // Increment the total event counter whenever an event is sent
                             event_count.fetch_add(1, Ordering::Relaxed);
@@ -392,7 +400,7 @@ impl Json2Splunk {
                 "expected_event_count": total,
                 "event_type": "ingestion_metadata",
             });
-            let payload = Json2Splunk::build_payload(summary_record, &ctx);
+            let payload = Json2Splunk::build_payload(summary_record, &ctx, add_uid);
             let mut hec = hec_template.clone();
             hec.batch_event(payload);
             hec.flush_batch();
@@ -434,6 +442,8 @@ impl Json2Splunk {
         // 4. Build shared event context (host/source/sourcetype/artifact...)
         let ctx = Arc::new(Self::build_event_context(file_tuples, &path));
     
+        let add_uid = self.add_uid;
+        
         // Create an atomic counter to count the number of events sent for this file.
         let event_count = Arc::new(AtomicU64::new(0));
 
@@ -627,7 +637,7 @@ impl Json2Splunk {
     
                     // 15.3 If Splunk HEC is configured: send record as a batched event
                     if let Some(ref mut hec) = hec_client {
-                        let payload = Json2Splunk::build_payload(record_val, &ctx);
+                        let payload = Json2Splunk::build_payload(record_val, &ctx, add_uid);
                         hec.batch_event(payload);
                         local_count += 1;
                         // Increment the overall event counter
@@ -672,7 +682,7 @@ impl Json2Splunk {
                 "expected_event_count": total,
                 "event_type": "ingestion_metadata",
             });
-            let payload = Json2Splunk::build_payload(summary_record, &ctx);
+            let payload = Json2Splunk::build_payload(summary_record, &ctx, add_uid);
             let mut hec = hec_template.clone();
             hec.batch_event(payload);
             hec.flush_batch();
@@ -885,7 +895,7 @@ impl Json2Splunk {
             true
         }
 
-    fn build_payload(record: Value, ctx: &EventContext) -> Value {
+    fn build_payload(record: Value, ctx: &EventContext, add_uid: bool) -> Value {
         let mut host = normalize_host(&ctx.host_base);
 
         if let Some(ref host_path_str) = ctx.host_path {
@@ -904,6 +914,10 @@ impl Json2Splunk {
                 "artifact": ctx.artifact,
             }
         });
+
+        if add_uid {
+            payload["fields"]["uid"] = Value::String(Uuid::new_v4().to_string());
+        }
 
         if !ctx.timestamp_paths.is_empty() {
             let fmt_opt = if ctx.timestamp_format.is_empty() {

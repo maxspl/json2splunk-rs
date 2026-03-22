@@ -65,6 +65,11 @@ struct Cli {
     /// instead of sending events to Splunk (VRL normalize test mode).
     #[arg(long, value_name = "DIR")]
     normalize_test_dir: Option<PathBuf>,
+
+    /// Add a unique ID to each ingested event as a Splunk metadata field
+    #[arg(long = "uid")]
+    uid: bool,
+
 }
 
 fn main() {
@@ -85,6 +90,7 @@ fn main() {
     info!("Input identification completed in {:?}", id_time.duration_since(start));
 
     let mut j2s = Json2Splunk::new(cli.normalize_test_dir.clone());
+    j2s.set_add_uid(cli.uid);
     j2s.set_vrl_dir(cli.vrl_dir.clone());
 
     let normalize_mode = cli.normalize_test_dir.is_some();
