@@ -107,6 +107,10 @@ struct Cli {
     /// File encoding when using --file (e.g. utf-8, latin-1).
     #[arg(long = "encoding", requires = "file")]
     encoding: Option<String>,
+
+    /// Source value to assign when using --file. Defaults to the file stem.
+    #[arg(long = "source", requires = "file")]
+    source: Option<String>,
 }
 
 fn main() {
@@ -141,7 +145,7 @@ fn main() {
             timestamp_path: cli.timestamp_path.clone(),
             timestamp_format,
             host_path: cli.host_path.clone(),
-            source: stem.clone(),
+            source: cli.source.clone().unwrap_or_else(|| stem.clone()),
             artifact,
             normalize: cli.normalize.clone(),
             encoding: cli.encoding.clone(),
