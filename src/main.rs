@@ -9,7 +9,7 @@ mod utils;
 mod splunk_utils;
 mod json2splunk;
 
-use crate::utils::file_matcher::FileMatcher;
+use crate::utils::file_matcher::{FileMatcher, FileTuple};
 use json2splunk::Json2Splunk;
 use num_cpus;
 
@@ -21,9 +21,13 @@ struct Cli {
     #[arg(short = 'v', long = "verbosity", default_value = "INFO")]
     verbosity: String,
 
-    /// Directory to index (required)
-    #[arg(long = "input", required = true)]
-    input: PathBuf,
+    /// Directory to index. Required unless --file is provided.
+    #[arg(long = "input", required_unless_present = "file")]
+    input: Option<PathBuf>,
+
+    /// Single file to process. When set, --indexer_patterns is not required.
+    #[arg(long = "file")]
+    file: Option<PathBuf>,
 
     /// Optional : Specifies the file input type (json|jsonl|csv). Default is None.
     #[arg(long = "input_type")]
@@ -49,7 +53,7 @@ struct Cli {
     #[arg(long = "config_spl", default_value = "splunk_configuration.yml")]
     config_spl: PathBuf,
 
-    /// Specifies the path to the file patterns configuration
+    /// Specifies the path to the file patterns configuration. Not required when --file is used.
     #[arg(long = "indexer_patterns", default_value = "indexer_patterns.yml")]
     indexer_patterns: PathBuf,
 
@@ -70,6 +74,43 @@ struct Cli {
     #[arg(long = "uid")]
     uid: bool,
 
+    // --- Options only used with --file ---
+
+    /// Sourcetype to assign when using --file. Defaults to the file stem.
+    #[arg(long = "sourcetype", requires = "file")]
+    sourcetype: Option<String>,
+
+    /// Host value to assign when using --file. Defaults to "Unknown".
+    #[arg(long = "host", requires = "file")]
+    host: Option<String>,
+
+    /// Artifact name when using --file. Defaults to the file stem.
+    #[arg(long = "artifact", requires = "file")]
+    artifact: Option<String>,
+
+    /// JSON path(s) to the timestamp field when using --file (repeatable: --timestamp_path a --timestamp_path b).
+    #[arg(long = "timestamp_path", requires = "file")]
+    timestamp_path: Vec<String>,
+
+    /// Timestamp format (strftime) when using --file.
+    #[arg(long = "timestamp_format", requires = "file")]
+    timestamp_format: Option<String>,
+
+    /// JSON path to the host field when using --file.
+    #[arg(long = "host_path", requires = "file")]
+    host_path: Option<String>,
+
+    /// VRL normalize script(s) when using --file (repeatable: --normalize s1 --normalize s2).
+    #[arg(long = "normalize", requires = "file")]
+    normalize: Vec<String>,
+
+    /// File encoding when using --file (e.g. utf-8, latin-1).
+    #[arg(long = "encoding", requires = "file")]
+    encoding: Option<String>,
+
+    /// Source value to assign when using --file. Defaults to the file stem.
+    #[arg(long = "source", requires = "file")]
+    source: Option<String>,
 }
 
 fn main() {
@@ -82,12 +123,41 @@ fn main() {
     let start = Instant::now();
     info!("Using {} CPUs", cli.nb_cpu);
 
-    let mut fm = FileMatcher::new(cli.indexer_patterns.clone(), cli.test, cli.ext.clone());
-    fm.create_dataframe(&cli.input);
-    fm.print_statistics();
-
-    let id_time = Instant::now();
-    info!("Input identification completed in {:?}", id_time.duration_since(start));
+    let tuples: Vec<FileTuple> = if let Some(ref file_path) = cli.file {
+        if !file_path.exists() {
+            eprintln!("Error: file not found: {:?}", file_path);
+            std::process::exit(1);
+        }
+        let stem = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let sourcetype = cli.sourcetype.clone().unwrap_or_else(|| stem.clone());
+        let host = cli.host.clone().unwrap_or_else(|| "Unknown".to_string());
+        let artifact = cli.artifact.clone().unwrap_or_else(|| stem.clone());
+        let timestamp_format = cli.timestamp_format.clone().unwrap_or_default();
+        info!("Single file mode: {:?}", file_path);
+        vec![FileTuple {
+            file_path: file_path.clone(),
+            sourcetype,
+            host,
+            timestamp_path: cli.timestamp_path.clone(),
+            timestamp_format,
+            host_path: cli.host_path.clone(),
+            source: cli.source.clone().unwrap_or_else(|| stem.clone()),
+            artifact,
+            normalize: cli.normalize.clone(),
+            encoding: cli.encoding.clone(),
+        }]
+    } else {
+        let input_dir = cli.input.as_ref().unwrap();
+        let mut fm = FileMatcher::new(cli.indexer_patterns.clone(), cli.test, cli.ext.clone());
+        fm.create_dataframe(input_dir);
+        fm.print_statistics();
+        info!("Input identification completed in {:?}", start.elapsed());
+        fm.list_of_tuples
+    };
 
     let mut j2s = Json2Splunk::new(cli.normalize_test_dir.clone());
     j2s.set_add_uid(cli.uid);
@@ -101,12 +171,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    if !cli.input_type.is_none() {
+    if cli.input_type.is_some() {
         j2s.input_type = cli.input_type.clone();
     }
 
     if j2s.configure(index_str, cli.nb_cpu, cli.test, &cli.config_spl) {
-        j2s.ingest(&fm.list_of_tuples);
+        j2s.ingest(&tuples);
     }
 
     info!("Finished in {:?}", start.elapsed());
