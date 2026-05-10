@@ -33,7 +33,8 @@ This tool allows to ingest `jsonl` and `csv` into Splunk using HEC.
      ssl: {splunk_enable_ssl} # Default is False
    ```
 
-3. **Set File Matching Rules**:
+3. **Set File Matching Rules** - Optional if using `--file` arg:
+
    Edit `indexer_patterns.yml` to define the patterns for the files you want to ingest:
    ```yaml
    <source_name>:
@@ -81,11 +82,13 @@ json2splunk-rs --input /path/to/logs --index my_index --nb_cpu 4
 json2splunk-rs --input /path/to/logs --index my_index --ext ".csv,.jsonl"
 json2splunk-rs --input /path/to/logs --index my_index --vrl_dir /opt/json2splunk/vrl
 json2splunk-rs --input /path/to/logs --normalize-test-dir ./normalized_output
+json2splunk-rs --file ./Security.jsonl --index my_index --config_spl /opt/json2splunk/splunk_configuration.yml --source windows:evtx --sourcetype _json --artifact EVTX --timestamp_path "Event.System.TimeCreated.#attributes.SystemTime"
 ```
 
 ### Parameters
 
 - `--input`: Mandatory. Directory containing the log files to process.
+- `--file`: Process a single file. When used, `--indexer_patterns` is not required. 
 - `--index`: Mandatory unless --normalize-test-dir is used. The name of the Splunk index to use.
 - `--nb_cpu`: Optional. Specifies the number of CPUs to use for processing. Defaults to the number of available CPUs.
 - `--test`: Optional. Enables test mode where no data is sent to Splunk. Useful for debugging.
@@ -95,6 +98,67 @@ json2splunk-rs --input /path/to/logs --normalize-test-dir ./normalized_output
 - `--vrl_dir`: Optional. Directory where VRL scripts referenced in indexer_patterns.yml are located. Defaults to the current directory.
 - `--normalize-test-dir`: Optional. Writes normalized (post-VRL) JSONL files to a directory instead of sending them to Splunk. Useful for testing transformations.
 - `--verbosity`: Optional. Controls log verbosity (DEBUG, INFO, WARNING, ERROR). Defaults to INFO.
+- `--no-uid`: Disable automatic `uid` metadata generation on real ingested events.
+
+### Single-file parameters
+
+These are used only with `--file`:
+
+- `--source`: Optional. Splunk source value. Defaults to the filename without extension.
+- `--sourcetype`: Optional. Splunk sourcetype. Defaults to the filename without extension.
+- `--host`: Optional. Host value. Defaults to `Unknown`.
+- `--artifact`: Optional. Artifact metadata field. Defaults to the filename without extension.
+- `--timestamp_path`: Optional. JSON path used to extract event time. Defaults to an empty list.
+- `--timestamp_format`: Optional. Timestamp format used with `--timestamp_path`. Defaults to an empty string.
+- `--host_path`: Optional. JSON path used to extract the host from each event after normalization. Defaults to `None`.
+- `--normalize`: Optional. VRL script path. Defaults to an empty list.
+- `--encoding`: Optional. File encoding hint. Defaults to `None`.
+
+
+## UID behavior
+
+By default, every event sent to Splunk receives a generated UUID in HEC `fields.uid`:
+
+```json
+{
+  "fields": {
+    "uid": "550e8400-e29b-41d4-a716-446655440000",
+    "sourcefile": "/case/evtx/Security.jsonl",
+    "artifact": "EVTX"
+  }
+}
+```
+
+This is intended for timeline flagging and event correlation after ingestion.
+
+Use `--no-uid` only if you explicitly do not want this metadata field.
+
+The generated `uid` is Splunk HEC metadata, not a field inserted inside the original event JSON object.
+
+## Ingestion metadata events
+
+After each processed input file, `json2splunk-rs` sends one additional metadata event to Splunk. It uses a dedicated source:
+
+```text
+source=json2splunk:ingestion_metadata
+sourcetype=_json
+```
+
+Example event body:
+
+```json
+{
+  "source=json2splunk": "ingestion_metadata",
+  "sourcetype": "_json",
+  "event_type": "ingestion_metadata",
+  "expected_event_count": 1234,
+  "original_source": "evtx",
+  "original_sourcetype": "_json",
+  "original_sourcefile": "/case/evtx/Security.jsonl"
+}
+```
+
+`expected_event_count` is the number of real events queued for Splunk HEC for that input file. It does not include the metadata event itself.
 
 ### VRL Support
 
@@ -122,7 +186,7 @@ Example of `transform.vrl`:
    The following rule-based extractions occur **after VRL has finished**:
 - `timestamp_path` (first matching key is used)
 - `timestamp_format`
-o- `host_path`
+- `host_path`
 
 3. **Source / sourcetype / artifact assignment**  
    Values from the matching rule are applied to prepare metadata for Splunk ingestion.

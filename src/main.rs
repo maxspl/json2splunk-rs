@@ -70,9 +70,13 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     normalize_test_dir: Option<PathBuf>,
 
-    /// Add a unique ID to each ingested event as a Splunk metadata field
-    #[arg(long = "uid")]
+   /// Deprecated: UID metadata is enabled by default. This flag is kept for compatibility.
+    #[arg(long = "uid", hide = true)]
     uid: bool,
+
+    /// Disable automatic UID metadata on ingested events.
+    #[arg(long = "no-uid", conflicts_with = "uid")]
+    no_uid: bool,
 
     // --- Options only used with --file ---
 
@@ -160,7 +164,7 @@ fn main() {
     };
 
     let mut j2s = Json2Splunk::new(cli.normalize_test_dir.clone());
-    j2s.set_add_uid(cli.uid);
+    j2s.set_add_uid(cli.uid || !cli.no_uid);
     j2s.set_vrl_dir(cli.vrl_dir.clone());
 
     let normalize_mode = cli.normalize_test_dir.is_some();
