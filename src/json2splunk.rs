@@ -59,6 +59,7 @@ struct EventContext {
 /// Main struct
 pub struct Json2Splunk {
     hec_template: Option<HttpEventCollector>,
+    splunk_helper: Option<SplunkHelper>,
     pub nb_cpu: usize,
     pub test_mode: bool,
     pub index: String,
@@ -92,6 +93,7 @@ impl Json2Splunk {
 
             Json2Splunk {
                 hec_template: None,
+                splunk_helper: None,
                 nb_cpu: 1,
                 test_mode: false,
                 index: String::new(),
@@ -886,8 +888,141 @@ impl Json2Splunk {
 
             info!("HEC Instance Ready: server_uri={}", hec.server_uri());
             self.hec_template = Some(hec);
+            self.splunk_helper = Some(helper);
             info!("Splunk configuration successful.");
             true
+    }
+
+ 
+    /// Removes files whose ingestion already completed in Splunk for the target index.
+    ///
+    /// The state is read from json2splunk-rs per-file ingestion_metadata events
+    /// using tstats over the indexed HEC field sourcefile.
+    ///
+    /// Returns None if the Splunk state cannot be retrieved, allowing the caller
+    /// to abort instead of silently re-ingesting duplicates.
+    pub fn filter_ingested(&self, tuples: Vec<FileTuple>) -> Option<Vec<FileTuple>> {
+        // Nothing is sent to Splunk in these modes; nothing to filter.
+        if self.test_mode || self.normalize_test_dir.is_some() {
+            return Some(tuples);
+        }
+
+        if tuples.is_empty() {
+            return Some(tuples);
+        }
+
+        let helper = match self.splunk_helper.as_ref() {
+            Some(h) => h,
+            None => {
+                error!("Cannot filter ingested files: Splunk helper not configured.");
+                return None;
+            }
+        };
+
+        let done = helper.list_completed_sourcefiles_tstats(&self.index)?;
+        if done.is_empty() {
+            return Some(tuples);
+        }
+
+        let total = tuples.len();
+        let remaining: Vec<FileTuple> = tuples
+            .into_iter()
+            .filter(|t| {
+                let key = t.file_path.to_string_lossy().to_string();
+                if done.contains(&key) {
+                    debug!("Skipping already ingested file {:?}", t.file_path);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        info!(
+            "skip_ingested: {} file(s) already in Splunk, {} left to ingest.",
+            total - remaining.len(),
+            remaining.len()
+        );
+
+        Some(remaining)
+    }
+
+
+    /// Re-ingests all candidate files. If a candidate sourcefile already has an
+    /// ingestion_metadata event in Splunk, all indexed events carrying that
+    /// sourcefile are deleted first with `| delete`.
+    ///
+    /// Deletion happens immediately before processing each matching file, instead
+    /// of deleting everything upfront, to reduce the impact of a later ingestion
+    /// failure.
+    pub fn overwrite_ingest(&mut self, tuples: &[FileTuple]) -> Option<()> {
+        if self.normalize_test_dir.is_some() || self.test_mode {
+            self.ingest(tuples);
+            return Some(());
+        }
+
+        if tuples.is_empty() {
+            info!("No files to ingest.");
+            return Some(());
+        }
+
+        let helper = match self.splunk_helper.as_ref() {
+            Some(h) => h,
+            None => {
+                error!("Cannot overwrite ingested files: Splunk helper not configured.");
+                return None;
+            }
+        };
+
+        let done = helper.list_completed_sourcefiles_tstats(&self.index)?;
+        let already_present = tuples
+            .iter()
+            .filter(|t| done.contains(&t.file_path.to_string_lossy().to_string()))
+            .count();
+
+        info!(
+            "overwrite_ingested: {} of {} candidate file(s) already exist in Splunk and will be deleted before re-ingestion.",
+            already_present,
+            tuples.len()
+        );
+
+        let hec_template = match self.hec_template.clone() {
+            Some(h) => Some(h),
+            None => {
+                error!("HEC template not configured; call configure() first.");
+                return None;
+            }
+        };
+
+        let normalize_dir = self.normalize_test_dir.clone();
+
+        for file_tuples in tuples {
+            let sourcefile = file_tuples.file_path.to_string_lossy().to_string();
+
+            if done.contains(&sourcefile) {
+                info!(
+                    "overwrite_ingested: deleting existing Splunk events for sourcefile={}",
+                    sourcefile
+                );
+
+                if !helper.delete_sourcefile_events(&self.index, &sourcefile) {
+                    error!(
+                        "overwrite_ingested: failed to delete existing events for sourcefile={}",
+                        sourcefile
+                    );
+                    return None;
+                }
+            }
+
+            debug!(
+                "Starting ingestion of file {:?} for source {}",
+                file_tuples.file_path,
+                file_tuples.source
+            );
+            self.process_file(hec_template.as_ref(), file_tuples, normalize_dir.as_ref());
+        }
+
+        Some(())
     }
 
     fn build_ingestion_metadata_payload(expected_event_count: u64, ctx: &EventContext) -> Value {

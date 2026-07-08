@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use log::{error, info, warn};
@@ -295,4 +295,145 @@ impl SplunkHelper {
 
         Some(token)
     }
+
+    fn escape_spl_string(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    }
+
+
+    /// Returns sourcefile values whose ingestion completed in the given index,
+    /// based on per-file ingestion_metadata events emitted by json2splunk-rs.
+    ///
+    /// The lookup uses tstats against indexed metadata, grouped by the indexed
+    /// HEC field sourcefile. 
+    ///
+    /// A file interrupted mid-ingestion has no metadata event and is therefore not
+    /// reported as ingested. Returns `None` if the search could not be run or read.
+    pub fn list_completed_sourcefiles_tstats(&self, index: &str) -> Option<HashSet<String>> {
+        let safe_index = Self::escape_spl_string(index);
+        let spl = format!(
+            "| tstats count where index=\"{}\" source=\"json2splunk:ingestion_metadata\" by sourcefile",
+            safe_index
+        );
+
+        let mut form = HashMap::new();
+        form.insert("search", spl.as_str());
+        form.insert("exec_mode", "oneshot");
+        form.insert("output_mode", "json");
+        form.insert("count", "0");
+        form.insert("earliest_time", "0");
+        form.insert("latest_time", "now");
+
+        let url = format!("{}/services/search/jobs", self.surl);
+        let resp = match self
+            .client
+            .request(reqwest::Method::POST, &url)
+            .basic_auth(&self.suser, Some(&self.spass))
+            // A oneshot tstats search can still take time on very large indexes.
+            .timeout(Duration::from_secs(120))
+            .form(&form)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Oneshot tstats request error on {}: {}", url, e);
+                return None;
+            }
+        };
+
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            error!("Oneshot tstats failed (status {}): {}", status, body);
+            return None;
+        }
+
+        let parsed: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to parse oneshot tstats response: {}", e);
+                return None;
+            }
+        };
+
+        let mut out = HashSet::new();
+        if let Some(results) = parsed.get("results").and_then(|r| r.as_array()) {
+            for r in results {
+                if let Some(sf) = r.get("sourcefile").and_then(|v| v.as_str()) {
+                    out.insert(sf.to_string());
+                }
+            }
+        }
+
+        info!(
+            "Splunk tstats reports {} file(s) already fully ingested in index '{}'.",
+            out.len(),
+            index
+        );
+
+        Some(out)
+    }
+
+    /// Deletes all events for one indexed sourcefile from the target index.
+    ///
+    /// This uses Splunk's `delete` search command, so the configured user must
+    /// have the relevant capability. Events are hidden from future searches, not
+    /// physically removed from buckets.
+    pub fn delete_sourcefile_events(&self, index: &str, sourcefile: &str) -> bool {
+        let safe_index = Self::escape_spl_string(index);
+        let safe_sourcefile = Self::escape_spl_string(sourcefile);
+        let spl = format!(
+            r#"search index="{}" sourcefile="{}" | delete"#,
+            safe_index,
+            safe_sourcefile
+        );
+
+        let mut form = HashMap::new();
+        form.insert("search", spl.as_str());
+        form.insert("exec_mode", "blocking");
+        form.insert("output_mode", "json");
+        form.insert("earliest_time", "0");
+        form.insert("latest_time", "now");
+
+        let url = format!("{}/services/search/jobs", self.surl);
+        let resp = match self
+            .client
+            .request(reqwest::Method::POST, &url)
+            .basic_auth(&self.suser, Some(&self.spass))
+            // Deleting events for a large file can take longer than normal API calls.
+            .timeout(Duration::from_secs(600))
+            .form(&form)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Delete search request error on {}: {}", url, e);
+                return false;
+            }
+        };
+
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            error!(
+                "Delete search failed for sourcefile={} (status {}): {}",
+                sourcefile,
+                status,
+                body
+            );
+            return false;
+        }
+
+        info!(
+            "Delete search completed for sourcefile={} in index '{}'.",
+            sourcefile,
+            index
+        );
+        true
+    }
+
 }

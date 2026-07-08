@@ -82,6 +82,8 @@ json2splunk-rs --input /path/to/logs --index my_index --nb_cpu 4
 json2splunk-rs --input /path/to/logs --index my_index --ext ".csv,.jsonl"
 json2splunk-rs --input /path/to/logs --index my_index --vrl_dir /opt/json2splunk/vrl
 json2splunk-rs --input /path/to/logs --normalize-test-dir ./normalized_output
+json2splunk-rs --input /path/to/logs --index my_index --force_reingest
+json2splunk-rs --input /path/to/logs --index my_index --overwrite_ingested
 json2splunk-rs --file ./Security.jsonl --index my_index --config_spl /opt/json2splunk/splunk_configuration.yml --source windows:evtx --sourcetype _json --artifact EVTX --timestamp_path "Event.System.TimeCreated.#attributes.SystemTime"
 ```
 
@@ -99,7 +101,9 @@ json2splunk-rs --file ./Security.jsonl --index my_index --config_spl /opt/json2s
 - `--normalize-test-dir`: Optional. Writes normalized (post-VRL) JSONL files to a directory instead of sending them to Splunk. Useful for testing transformations.
 - `--verbosity`: Optional. Controls log verbosity (DEBUG, INFO, WARNING, ERROR). Defaults to INFO.
 - `--no-uid`: Disable automatic `uid` metadata generation on real ingested events.
-
+- `--force_reingest`: Disable the filter that detect already ingested files and ingest all matched files. This can create duplicates.
+- `--overwrite_ingested`: Delete existing events with the same indexed `sourcefile` value, then ingest the file again. This requires the Splunk user to be allowed to run the `delete` command. Conflicts with `--force_reingest`.
+ 
 ### Single-file parameters
 
 These are used only with `--file`:
@@ -134,6 +138,34 @@ This is intended for timeline flagging and event correlation after ingestion.
 Use `--no-uid` only if you explicitly do not want this metadata field.
 
 The generated `uid` is Splunk HEC metadata, not a field inserted inside the original event JSON object.
+
+## Already ingested files
+
+By default, `json2splunk-rs` avoids duplicate ingestion. Before sending data to Splunk, it tries to find already ingested files:
+
+```spl
+| tstats count where index="<index>" source="json2splunk:ingestion_metadata" by sourcefile
+```
+
+Any matched input file whose absolute path is already present in the indexed `sourcefile` field is skipped.
+
+To bypass this protection and ingest everything anyway:
+
+```bash
+json2splunk-rs --input /path/to/logs --index my_index --force_reingest
+```
+
+To replace existing events for already ingested files:
+
+```bash
+json2splunk-rs --input /path/to/logs --index my_index --overwrite_ingested
+```
+
+`--overwrite_ingested` runs a delete search for each already ingested source file before processing it again:
+
+```spl
+search index="<index>" sourcefile="/absolute/path/to/file.jsonl" | delete
+```
 
 ## Ingestion metadata events
 

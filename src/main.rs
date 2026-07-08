@@ -78,6 +78,16 @@ struct Cli {
     #[arg(long = "no-uid", conflicts_with = "uid")]
     no_uid: bool,
 
+    /// Force ingestion even when the file already has a completed ingestion_metadata event in Splunk.
+    /// By default, json2splunk-rs skips already ingested files.
+    #[arg(long = "force_reingest", conflicts_with = "overwrite_ingested")]
+    force_reingest: bool,
+
+    /// Delete existing events for already ingested sourcefiles, then ingest them again.
+    /// This requires the Splunk delete capability.
+    #[arg(long = "overwrite_ingested", conflicts_with = "force_reingest")]
+    overwrite_ingested: bool,
+
     // --- Options only used with --file ---
 
     /// Sourcetype to assign when using --file. Defaults to the file stem.
@@ -180,7 +190,39 @@ fn main() {
     }
 
     if j2s.configure(index_str, cli.nb_cpu, cli.test, &cli.config_spl) {
-        j2s.ingest(&tuples);
+        if cli.overwrite_ingested {
+            if j2s.overwrite_ingest(&tuples).is_none() {
+                eprintln!(
+                    "Error: could not overwrite already ingested events in Splunk, \
+                    aborting before continuing re-ingestion. \
+                    Check that the Splunk user can run the delete command."
+                );
+                std::process::exit(1);
+            }
+        } else {
+            let tuples = if cli.force_reingest {
+                info!("force_reingest: disabled already-ingested filtering, all candidate files will be ingested.");
+                tuples
+            } else {
+                match j2s.filter_ingested(tuples) {
+                    Some(t) => t,
+                    None => {
+                        eprintln!(
+                            "Error: could not retrieve ingestion state from Splunk, \
+                            aborting instead of risking duplicates. \
+                            Rerun with --force_reingest to force ingestion."
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            if tuples.is_empty() {
+                info!("No file left to ingest after already-ingested filtering.");
+            } else {
+                j2s.ingest(&tuples);
+            }
+        }
     }
 
     info!("Finished in {:?}", start.elapsed());
